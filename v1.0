@@ -1,0 +1,128 @@
+import traceback
+import praw
+import time
+import sqlite3
+import obot
+import time
+import datetime
+from string import Template
+
+'''USER CONFIGURATION'''
+
+APP_ID = "_LhyiCqbI0rUHg"
+APP_SECRET = "IXKqpBl2vRbjo4dJTsjTGCbvT3Q"
+APP_URI = "https://127.0.0.1:65010/authorize_callback"
+APP_REFRESH = "63381466-eNJ-DI7KTplTATouct1qP40ZAhQ"
+USERAGENT = "TimeUntilTrump"
+SUBREDDIT = "test"
+DO_SUBMISSIONS = False
+DO_COMMENTS = True
+KEYWORDS = ["President", "MAGA"]
+KEYAUTHORS = []
+TIMEDELTA = datetime.datetime(2016, 11, 8) - datetime.datetime.now()
+
+class DeltaTemplate(Template):
+    delimiter = "%"
+
+def strfdelta(tdelta, fmt):
+    d = {"D": tdelta.days}
+    d["H"], rem = divmod(tdelta.seconds, 3600)
+    d["M"], d["S"] = divmod(rem, 60)
+    t = DeltaTemplate(fmt)
+    return t.substitute(**d)
+
+REPLYSTRING = strfdelta(TIMEDELTA, "##Donald J. Trump will ~~be president~~ MAGA in %D days, %H hours, %M minutes, and %S seconds\n\nThis bot was made by /u/dicemorris\n\nSource Code: http://pastebin.com/KH6FiRnY\n\nPlease submit suggestions to my inbox :)")
+MAXPOSTS = 100
+WAIT = 10
+
+CLEANCYCLES = 25
+
+'''All done!'''
+
+try:
+    import bot
+    USERAGENT = bot.aG
+except ImportError:
+    pass
+
+print('Opening SQL Database')
+sql = sqlite3.connect('sql.db')
+cur = sql.cursor()
+cur.execute('CREATE TABLE IF NOT EXISTS oldposts(id TEXT)')
+
+print('Logging in...')
+r = praw.Reddit(USERAGENT)
+r.set_oauth_app_info(APP_ID, APP_SECRET, APP_URI)
+r.refresh_access_information(APP_REFRESH)
+
+def replybot():
+    print('Searching %s.' % SUBREDDIT)
+    subreddit = r.get_subreddit(SUBREDDIT)
+    posts = []
+    if DO_SUBMISSIONS:
+        posts += list(subreddit.get_new(limit=MAXPOSTS))
+    if DO_COMMENTS:
+        posts += list(subreddit.get_comments(limit=MAXPOSTS))
+    posts.sort(key=lambda x: x.created_utc)
+
+    for post in posts:
+        # Anything that needs to happen every loop goes here.
+        pid = post.id
+
+        try:
+            pauthor = post.author.name
+        except AttributeError:
+            # Author is deleted.
+            continue
+
+        if pauthor.lower() == r.user.name.lower():
+            # Don't reply to yourself, robot!
+            print('Will not reply to myself.')
+            continue
+
+        if KEYAUTHORS != [] and not any(auth.lower() == pauthor.lower() for auth in KEYAUTHORS):
+            # This post was not made by a keyauthor
+            continue
+
+        cur.execute('SELECT * FROM oldposts WHERE ID=?', [pid])
+        if cur.fetchone():
+            # Post is already in the database
+            continue
+
+        if isinstance(post, praw.objects.Comment):
+            pbody = post.body
+        else:
+            pbody = '%s %s' % (post.title, post.selftext)
+        pbody = pbody.lower()
+
+        if not any(key.lower() in pbody for key in KEYWORDS):
+            # Does not contain keyword
+            continue
+
+        cur.execute('INSERT INTO oldposts VALUES(?)', [pid])
+        sql.commit()
+        print('Replying to %s by %s' % (pid, pauthor))
+        try:
+            if hasattr(post, "reply"):
+                post.reply(REPLYSTRING)
+            else:
+                post.add_comment(REPLYSTRING)
+        except praw.errors.Forbidden:
+            print('403 FORBIDDEN - is the bot banned from %s?' % post.subreddit.display_name)
+
+cycles = 0
+while True:
+    try:
+        replybot()
+        cycles += 1
+    except Exception as e:
+        traceback.print_exc()
+    if cycles >= CLEANCYCLES:
+        print('Cleaning database')
+        cur.execute('DELETE FROM oldposts WHERE id NOT IN (SELECT id FROM oldposts ORDER BY id DESC LIMIT ?)', [MAXPOSTS * 2])
+        sql.commit()
+        cycles = 0
+    print('Running again in %d seconds \n' % WAIT)
+    time.sleep(WAIT)
+
+    
